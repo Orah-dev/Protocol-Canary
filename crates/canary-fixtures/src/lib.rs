@@ -4,10 +4,12 @@
 //! surface-specific body (as a raw [`toml::Value`]) to the caller; it does
 //! not know how to interpret an XDR, RPC, or Soroban fixture body itself.
 
+pub mod digest;
 pub mod loader;
 pub mod manifest;
 pub mod validator;
 
+pub use digest::pack_digest;
 pub use loader::{load_directory, FixtureError};
 pub use manifest::{parse_fixture_file, parse_fixture_str, LoadedFixture};
 pub use validator::validate;

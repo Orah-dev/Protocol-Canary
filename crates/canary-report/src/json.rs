@@ -13,6 +13,7 @@ use canary_core::{
     Status, Surface,
 };
 
+use crate::diff::{AddedEntry, DiffReport, DiffVerdict, MissingEntry, Transition};
 use crate::{NetworkSummary, ProjectSummary, ReportInput, SkipSummary};
 
 /// The current JSON report schema version. Bump this, and keep the old
@@ -186,6 +187,8 @@ pub enum JsonReportError {
     UnknownSurface(String),
     #[error("unrecognized status {0:?} in JSON report")]
     UnknownStatus(String),
+    #[error("unrecognized diff verdict {0:?} in diff JSON")]
+    UnknownVerdict(String),
 }
 
 fn parse_surface(value: &str) -> Result<Surface, JsonReportError> {
@@ -310,14 +313,178 @@ impl JsonReporter {
     /// so it can be re-rendered in another format without re-running
     /// anything.
     pub fn parse(json_text: &str) -> Result<ReportInput, JsonReportError> {
-        let report: JsonReport = serde_json::from_str(json_text)?;
-        if report.schema_version != SCHEMA_VERSION {
+        let (schema_version, input) = Self::parse_with_schema(json_text)?;
+        if schema_version != SCHEMA_VERSION {
             return Err(JsonReportError::UnsupportedSchemaVersion {
-                found: report.schema_version,
+                found: schema_version,
                 expected: SCHEMA_VERSION,
             });
         }
-        report.try_into()
+        Ok(input)
+    }
+
+    /// Like [`JsonReporter::parse`], but returns the `schemaVersion` the
+    /// report was written under instead of rejecting anything that
+    /// differs from [`SCHEMA_VERSION`].
+    ///
+    /// `stellar-canary diff` needs this: two stored reports may carry
+    /// different schema versions, and it is the comparison-eligibility
+    /// check (`canary_report::diff::validate_eligibility`) — not the
+    /// parser — that decides whether that is a refusal-worthy mismatch.
+    pub fn parse_with_schema(
+        json_text: &str,
+    ) -> Result<(u32, ReportInput), JsonReportError> {
+        let report: JsonReport = serde_json::from_str(json_text)?;
+        let schema_version = report.schema_version;
+        let input = report.try_into()?;
+        Ok((schema_version, input))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CF-05: rendering a report comparison as `diffVersion: 1` JSON.
+// ---------------------------------------------------------------------------
+
+/// The `diffVersion: 1` JSON shape of a [`DiffReport`].
+///
+/// Field order is fixed by the struct, and the entry vectors arrive
+/// pre-sorted by `(surface, testId)` from `canary_report::diff::compare`,
+/// so rendering the same comparison twice yields byte-identical JSON.
+#[derive(Debug, Serialize, Deserialize)]
+struct JsonDiffReport {
+    #[serde(rename = "diffVersion")]
+    diff_version: u32,
+    verdict: String,
+    transitions: Vec<JsonTransition>,
+    missing: Vec<JsonMissing>,
+    #[serde(rename = "added", skip_serializing_if = "Vec::is_empty", default)]
+    added: Vec<JsonAdded>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct JsonTransition {
+    surface: String,
+    #[serde(rename = "testId")]
+    test_id: String,
+    from: String,
+    to: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct JsonMissing {
+    surface: String,
+    #[serde(rename = "testId")]
+    test_id: String,
+    #[serde(rename = "baselineStatus")]
+    baseline_status: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct JsonAdded {
+    surface: String,
+    #[serde(rename = "testId")]
+    test_id: String,
+    status: String,
+}
+
+impl From<&DiffReport> for JsonDiffReport {
+    fn from(diff: &DiffReport) -> Self {
+        JsonDiffReport {
+            diff_version: diff.diff_version,
+            verdict: diff.verdict.as_str().to_string(),
+            transitions: diff
+                .transitions
+                .iter()
+                .map(|t| JsonTransition {
+                    surface: t.surface.to_string(),
+                    test_id: t.test_id.clone(),
+                    from: t.from.to_string(),
+                    to: t.to.to_string(),
+                })
+                .collect(),
+            missing: diff
+                .missing
+                .iter()
+                .map(|m| JsonMissing {
+                    surface: m.surface.to_string(),
+                    test_id: m.test_id.clone(),
+                    baseline_status: m.baseline_status.to_string(),
+                })
+                .collect(),
+            added: diff
+                .added
+                .iter()
+                .map(|a| JsonAdded {
+                    surface: a.surface.to_string(),
+                    test_id: a.test_id.clone(),
+                    status: a.status.to_string(),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// Renders a [`DiffReport`] as versioned, deterministic JSON and parses
+/// it back — the machine-readable output of `stellar-canary diff`.
+pub struct DiffJsonReporter;
+
+impl DiffJsonReporter {
+    pub fn render(diff: &DiffReport) -> String {
+        let json = JsonDiffReport::from(diff);
+        serde_json::to_string_pretty(&json)
+            .unwrap_or_else(|e| format!("{{\"error\": \"failed to serialize diff: {e}\"}}"))
+    }
+
+    /// Parses previously rendered `diffVersion` JSON back into a
+    /// [`DiffReport`].
+    pub fn parse(json_text: &str) -> Result<DiffReport, JsonReportError> {
+        let json: JsonDiffReport = serde_json::from_str(json_text)?;
+        let verdict =
+            DiffVerdict::parse(&json.verdict)
+                .ok_or_else(|| JsonReportError::UnknownVerdict(json.verdict.clone()))?;
+
+        let transitions = json
+            .transitions
+            .into_iter()
+            .map(|t| {
+                Ok(Transition {
+                    surface: parse_surface(&t.surface)?,
+                    test_id: t.test_id,
+                    from: parse_status(&t.from)?,
+                    to: parse_status(&t.to)?,
+                })
+            })
+            .collect::<Result<Vec<_>, JsonReportError>>()?;
+        let missing = json
+            .missing
+            .into_iter()
+            .map(|m| {
+                Ok(MissingEntry {
+                    surface: parse_surface(&m.surface)?,
+                    test_id: m.test_id,
+                    baseline_status: parse_status(&m.baseline_status)?,
+                })
+            })
+            .collect::<Result<Vec<_>, JsonReportError>>()?;
+        let added = json
+            .added
+            .into_iter()
+            .map(|a| {
+                Ok(AddedEntry {
+                    surface: parse_surface(&a.surface)?,
+                    test_id: a.test_id,
+                    status: parse_status(&a.status)?,
+                })
+            })
+            .collect::<Result<Vec<_>, JsonReportError>>()?;
+
+        Ok(DiffReport {
+            diff_version: json.diff_version,
+            verdict,
+            transitions,
+            missing,
+            added,
+        })
     }
 }
 

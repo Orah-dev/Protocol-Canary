@@ -83,3 +83,21 @@ for it, since triggering one requires an environment fault (e.g. a
 corrupt local cache file) rather than a normal CLI invocation. Its
 meaning above is taken directly from the source's `ErrorCategory::Internal`
 mapping, not guessed.
+
+## Exception: `diff` uses CF-05's own exit codes
+
+`stellar-canary diff` is the one subcommand that does **not** use the
+table above. Report comparison (CF-05) defines its own CI-gating
+convention, implemented as the `DiffExitCode` enum in
+`crates/canary-cli/src/commands.rs`:
+
+| Code | Meaning |
+|---|---|
+| `0` | Verdict `no-change` or `improved`. |
+| `1` | A report file could not be read or parsed (execution/syntax error). |
+| `2` | Verdict `regression` or `coverage-lost`; also reports that are not comparable (mismatched or unsupported `schemaVersion`, mismatched `targetProtocol`). |
+
+Note `2` therefore means "regressions found (or incomparable
+baselines)" for `diff`, whereas it means "configuration error" for
+every other subcommand — scripts must not mix the two conventions.
+All other commands, including `lock`, follow the standard table above.

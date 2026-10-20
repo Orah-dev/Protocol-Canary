@@ -5,6 +5,7 @@
 //! already decided by `canary_core::PolicyEvaluator` before a report is
 //! ever rendered.
 
+pub mod diff;
 pub mod json;
 pub mod markdown;
 pub mod terminal;
@@ -14,7 +15,11 @@ use canary_core::{
     Surface,
 };
 
-pub use json::JsonReporter;
+pub use diff::{
+    compare, compare_reports, validate_eligibility, AddedEntry, DiffReport, DiffVerdict,
+    IncompatibleReportsError, MissingEntry, StoredReport, Transition,
+};
+pub use json::{DiffJsonReporter, JsonReporter};
 pub use markdown::MarkdownReporter;
 pub use terminal::TerminalReporter;
 

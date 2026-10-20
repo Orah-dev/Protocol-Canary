@@ -1,6 +1,6 @@
 # CLI Reference
 
-`stellar-canary` ships five subcommands. This reference matches the CLI
+`stellar-canary` ships seven subcommands. This reference matches the CLI
 shipped in `v0.1.1`, verified directly against `stellar-canary --help`
 and each subcommand's own `--help` output.
 
@@ -14,6 +14,8 @@ Commands:
   inspect   Print offline project diagnostics
   fixtures  List fixtures available for a protocol
   report    Render a previously generated JSON report
+  diff      Compare two stored JSON reports and render the diff (CF-05)
+  lock      Pin the current fixture pack, protocol, and tool version in a `.stellar-canary.lock` (CF-03)
   version   Print the tool version
   help      Print this message or the help of the given subcommand(s)
 
@@ -28,6 +30,8 @@ Options:
 | [`inspect`](./inspect.md) | Print offline project diagnostics — no fixtures run, no network call. |
 | [`fixtures`](./fixtures.md) | List the fixtures a given `--fixtures-dir`/`--protocol` combination would run. |
 | [`report`](./report.md) | Re-render a previously saved JSON report in another format, without touching the network. |
+| [`diff`](./diff.md) | Compare two saved JSON reports (CF-05) and gate CI on the result. |
+| [`lock`](./lock.md) | Pin the current fixture pack, protocol, and tool version in `.stellar-canary.lock` (CF-03). |
 | `version` | Print the tool's own version. See [version](./version.md). |
 
 Every command accepts `-h`/`--help` for the exact, current flag list. If
