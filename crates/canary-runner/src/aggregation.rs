@@ -1,4 +1,13 @@
 //! Summarizing a set of [`CompatibilityResult`]s.
+//!
+//! This module is public API intended for **external consumers of
+//! `canary-runner`** — for example a CI integration or dashboard that runs
+//! the scheduler itself and wants aggregate counts without depending on
+//! the `canary-cli` binary. The CLI's own reporters deliberately do not
+//! use it: `canary-report` computes its JSON counts independently so that
+//! it never depends on this crate (see the comment on `JsonCounts` in
+//! `canary-report/src/json.rs`). The two count structures are kept in sync
+//! by hand.
 
 use canary_core::{CompatibilityResult, Status};
 
@@ -6,6 +15,16 @@ use canary_core::{CompatibilityResult, Status};
 ///
 /// Skipped fixtures are never included here: they are neither pass nor
 /// fail and are tracked separately by the planner.
+///
+/// # Examples
+///
+/// ```
+/// use canary_runner::summarize;
+///
+/// let summary = summarize(&[]);
+/// assert_eq!(summary.passed_fraction(), (0, 0));
+/// assert!(!summary.has_required_failure());
+/// ```
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ResultSummary {
     pub total: usize,
@@ -25,8 +44,71 @@ impl ResultSummary {
     pub fn has_required_failure(&self) -> bool {
         self.failed > 0 || self.errors > 0
     }
+
+    /// Whether at least one executed fixture produced a warning.
+    pub fn has_warnings(&self) -> bool {
+        self.warnings > 0
+    }
 }
 
+/// Aggregates a slice of test results into a [`ResultSummary`].
+///
+/// Counts the occurrences of each [`Status`] across the provided `results`,
+/// recording the counts of [`Pass`](Status::Pass), [`Fail`](Status::Fail),
+/// [`Warning`](Status::Warning), and [`Error`](Status::Error) outcomes.
+///
+/// The returned [`ResultSummary::total`] is initialized to `results.len()`.
+/// If the slice contains any [`Status::Skipped`] results, they are included
+/// in `total` but do not increment any of the four status-specific counters,
+/// as skipped fixtures are normally filtered and tracked during planning
+/// rather than execution.
+///
+/// If `results` is empty, this returns a default [`ResultSummary`] where all
+/// counts are zero.
+///
+/// This function performs a single linear pass over `results`, does not allocate,
+/// and never panics.
+///
+/// # Examples
+///
+/// ```
+/// use canary_core::{CompatibilityResult, ProtocolVersion, Status, Surface};
+/// use canary_runner::{summarize, ResultSummary};
+///
+/// let results = vec![
+///     CompatibilityResult {
+///         test_id: "xdr-01".into(),
+///         protocol: ProtocolVersion(28),
+///         surface: Surface::Xdr,
+///         status: Status::Pass,
+///         summary: "decoded successfully".into(),
+///         details: None,
+///         duration_ms: 5,
+///         fixture_id: None,
+///         source: canary_core::ResultSource::Live,
+///     },
+///     CompatibilityResult {
+///         test_id: "rpc-01".into(),
+///         protocol: ProtocolVersion(28),
+///         surface: Surface::Rpc,
+///         status: Status::Fail,
+///         summary: "assertion failed".into(),
+///         details: None,
+///         duration_ms: 12,
+///         fixture_id: None,
+///         source: canary_core::ResultSource::Live,
+///     },
+/// ];
+///
+/// let summary = summarize(&results);
+/// assert_eq!(summary.total, 2);
+/// assert_eq!(summary.passed, 1);
+/// assert_eq!(summary.failed, 1);
+/// assert_eq!(summary.warnings, 0);
+/// assert_eq!(summary.errors, 0);
+/// assert_eq!(summary.passed_fraction(), (1, 2));
+/// assert!(summary.has_required_failure());
+/// ```
 pub fn summarize(results: &[CompatibilityResult]) -> ResultSummary {
     let mut summary = ResultSummary {
         total: results.len(),
@@ -59,6 +141,7 @@ mod tests {
             details: None,
             duration_ms: 0,
             fixture_id: None,
+            source: canary_core::ResultSource::Live,
         }
     }
 
@@ -77,11 +160,13 @@ mod tests {
         assert_eq!(summary.failed, 1);
         assert_eq!(summary.warnings, 1);
         assert_eq!(summary.errors, 1);
+        assert!(summary.has_warnings());
     }
 
     #[test]
     fn empty_results_are_not_a_required_failure() {
         assert!(!summarize(&[]).has_required_failure());
+        assert!(!summarize(&[]).has_warnings());
     }
 
     #[test]

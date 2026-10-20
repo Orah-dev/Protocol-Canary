@@ -2,11 +2,14 @@
 
 mod cli;
 mod commands;
+mod error;
+mod fixtures_json;
+mod inspect_json;
 mod network;
 
 use clap::Parser;
 
-use cli::{Cli, Command};
+use cli::{CacheArgs, Cli, Command};
 
 #[tokio::main]
 async fn main() {
@@ -16,13 +19,13 @@ async fn main() {
     // `commands::DiffExitCode`) rather than `canary_core::ExitCode`, so
     // it computes the raw process code itself.
     let exit_code = match cli.command {
-        Command::Check(args) => commands::run_check(args).await.code(),
-        Command::Inspect(args) => commands::run_inspect(args).code(),
-        Command::Fixtures(args) => commands::run_fixtures(args).code(),
-        Command::Report(args) => commands::run_report(args).code(),
-        Command::Diff(args) => commands::run_diff(args),
-        Command::Lock(args) => commands::run_lock(args).code(),
-        Command::Version => commands::run_version().code(),
+        Command::Check(args) => commands::run_check(args).await,
+        Command::Inspect(args) => commands::run_inspect(args),
+        Command::Fixtures(args) => commands::run_fixtures(args),
+        Command::Report(args) => commands::run_report(args),
+        Command::Cache(CacheArgs::Clear(args)) => commands::run_cache_clear(args),
+        Command::Completions(args) => commands::run_completions(args),
+        Command::Version => commands::run_version(),
     };
 
     std::process::exit(exit_code);

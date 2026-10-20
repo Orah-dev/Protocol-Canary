@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'none'; img-src 'self' data:; base-uri 'none'; form-action 'none'">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Stellar Protocol Canary report viewer</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>Stellar Protocol Canary report viewer</h1>
+    <button id="theme" type="button" aria-pressed="false">Toggle theme</button>
+  </header>
+
+  <main>
+    <p>Open a <code>stellar-canary</code> JSON report. It is read in this browser tab and is not uploaded anywhere.</p>
+
+    <div id="drop" class="drop">
+      <label for="file">Choose a report file, or drop it here</label>
+      <input id="file" type="file" accept=".json,application/json">
+    </div>
+
+    <section id="result" hidden>
+      <div id="protocol-mismatch" class="mismatch-banner" role="alert" hidden></div>
+      <h2 id="heading"></h2>
+      <p id="status-line" aria-live="polite"></p>
+      <p id="invalid-reason" hidden></p>
+
+      <button id="open-source" type="button" hidden>View report JSON</button>
+
+      <ul id="warnings" hidden></ul>
+      <dl id="facts" hidden></dl>
+
+      <div id="findings" hidden>
+        <h3 id="findings-heading">Findings</h3>
+        <div class="controls">
+          <div id="tabs" class="tabs" role="tablist" aria-label="Filter findings by surface">
+            <button id="tab-all" type="button" role="tab" aria-selected="true" tabindex="0" aria-controls="panel-findings" data-surface="all">All</button>
+            <button id="tab-rpc" type="button" role="tab" aria-selected="false" tabindex="-1" aria-controls="panel-findings" data-surface="rpc">RPC</button>
+            <button id="tab-xdr" type="button" role="tab" aria-selected="false" tabindex="-1" aria-controls="panel-findings" data-surface="xdr">XDR</button>
+            <button id="tab-soroban" type="button" role="tab" aria-selected="false" tabindex="-1" aria-controls="panel-findings" data-surface="soroban">Soroban</button>
+          </div>
+          <div class="search">
+            <label for="search">Search findings</label>
+            <input id="search" type="search" placeholder="Fixture id or summary" aria-controls="findings-list">
+          </div>
+        </div>
+        <p id="search-status" aria-live="polite"></p>
+        <div id="panel-findings" role="tabpanel" aria-labelledby="tab-all">
+          <ul id="findings-list"></ul>
+          <p id="findings-empty" hidden></p>
+        </div>
+      </div>
+
+      <div id="skipped-section" hidden>
+        <h3 id="skipped-heading">Skipped fixtures</h3>
+        <ul id="skipped-list"></ul>
+      </div>
+    </section>
+
+    <aside>
+      <h2>Before you share a report</h2>
+      <p>A report can contain the project directory name and the Git branch name. Check it before posting it publicly. This page has no upload, copy or print feature.</p>
+    </aside>
+  </main>
+
+  <dialog id="report-source" aria-labelledby="report-source-title">
+    <h2 id="report-source-title">Report JSON</h2>
+    <p id="report-source-note"></p>
+    <pre tabindex="0"><code id="report-source-code"></code></pre>
+    <div class="dialog-actions">
+      <button id="close-source" type="button">Close</button>
+    </div>
+  </dialog>
+
+  <script src="report.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
