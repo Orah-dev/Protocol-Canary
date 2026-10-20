@@ -49,6 +49,16 @@ pub enum FixtureError {
         source: Box<toml::de::Error>,
     },
 
+    /// A fixture file is larger than [`MAX_FIXTURE_BYTES`]. Fixture bodies
+    /// are small TOML documents; an oversized one is a mistake or an attempt
+    /// to exhaust memory, and it is refused before it is read.
+    #[error("fixture file {path} is {size} bytes, over the {limit}-byte limit")]
+    FileTooLarge {
+        path: PathBuf,
+        size: u64,
+        limit: u64,
+    },
+
     #[error("failed to read fixture directory {path}: {source}")]
     ReadDir {
         path: PathBuf,
@@ -105,6 +115,13 @@ impl From<FixtureError> for CanaryError {
 /// Name of the version-control directory that the walk never enters.
 const VCS_DIR: &str = ".git";
 
+/// Largest fixture file the loader accepts, in bytes (1 MiB).
+///
+/// A fixture is a short TOML document; anything this large is not one. The
+/// cap is checked from the directory entry's metadata, so an oversized file
+/// is rejected before it is read into memory.
+pub const MAX_FIXTURE_BYTES: u64 = 1024 * 1024;
+
 /// Recursively loads every `*.toml` fixture file under `dir`.
 ///
 /// Returns fixtures in a deterministic (sorted-by-path) order so that
@@ -154,6 +171,20 @@ fn collect_toml_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), FixtureE
             }
             collect_toml_files(&path, out)?;
         } else if file_type.is_file() && path.extension().is_some_and(|ext| ext == "toml") {
+            let size = entry
+                .metadata()
+                .map_err(|source| FixtureError::Read {
+                    path: path.clone(),
+                    source,
+                })?
+                .len();
+            if size > MAX_FIXTURE_BYTES {
+                return Err(FixtureError::FileTooLarge {
+                    path,
+                    size,
+                    limit: MAX_FIXTURE_BYTES,
+                });
+            }
             out.push(path);
         }
     }

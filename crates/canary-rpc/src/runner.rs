@@ -47,6 +47,7 @@ pub enum RpcMethod {
     GetNetwork,
     GetLatestLedger,
     GetHealth,
+    GetEvents,
 }
 
 impl std::str::FromStr for RpcMethod {
@@ -57,8 +58,9 @@ impl std::str::FromStr for RpcMethod {
             "get-network" => Ok(RpcMethod::GetNetwork),
             "get-latest-ledger" => Ok(RpcMethod::GetLatestLedger),
             "get-health" => Ok(RpcMethod::GetHealth),
+            "get-events" => Ok(RpcMethod::GetEvents),
             other => Err(format!(
-                "unsupported rpc method {other:?}: supported methods are: \"get-network\", \"get-latest-ledger\", \"get-health\""
+                "unsupported rpc method {other:?}: supported methods are: \"get-network\", \"get-latest-ledger\", \"get-health\", \"get-events\""
             )),
         }
     }
@@ -190,6 +192,74 @@ fn compare_numbers(value: &serde_json::Number, bound: &serde_json::Number) -> Op
     value.as_f64()?.partial_cmp(&bound.as_f64()?)
 }
 
+/// One assertion about the `topic` array of an event in a `getEvents`
+/// result.
+///
+/// Every topic of the event is compared in one assertion, in order, so a
+/// fixture can pin a multi-topic event (for example an approval event whose
+/// topics are the event name, the contract and the spender) without one
+/// `field` assertion per position. The check reads the raw JSON `result`
+/// object (CA-01 section 4.1) rather than [`crate::models::Event`], so an
+/// untyped payload is never projected away before it is asserted on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventTopicsAssertion {
+    /// Position of the event in the result's `events` array.
+    pub index: usize,
+    /// The expected `topic` entries, in order.
+    pub topics: Vec<String>,
+}
+
+impl EventTopicsAssertion {
+    /// Checks the event at `index`, returning a human-readable failure
+    /// reason when the event, its `topic` array, or a topic differs.
+    pub fn check_value(&self, response: &JsonValue) -> Result<(), String> {
+        let events = response
+            .get("events")
+            .and_then(JsonValue::as_array)
+            .ok_or_else(|| {
+                "expected an \"events\" array in the getEvents result, but it was missing"
+                    .to_string()
+            })?;
+        let event = events.get(self.index).ok_or_else(|| {
+            format!(
+                "expected an event at index {}, but the result held {} event(s)",
+                self.index,
+                events.len()
+            )
+        })?;
+        let found = event
+            .get("topic")
+            .and_then(JsonValue::as_array)
+            .ok_or_else(|| {
+                format!(
+                    "expected event {} to have a \"topic\" array, but it was missing",
+                    self.index
+                )
+            })?;
+
+        if found.len() != self.topics.len() {
+            return Err(format!(
+                "expected event {} to have {} topic(s) {:?}, but found {} topic(s) {found:?}",
+                self.index,
+                self.topics.len(),
+                self.topics,
+                found.len()
+            ));
+        }
+
+        for (position, (found, expected)) in found.iter().zip(&self.topics).enumerate() {
+            if found.as_str() != Some(expected.as_str()) {
+                return Err(format!(
+                    "expected event {} topic {position} to equal {expected:?}, but found {found}",
+                    self.index
+                ));
+            }
+        }
+
+        Ok(())
+    }
+}
+
 /// One assertion about a field in the RPC response.
 #[derive(Debug, Clone, PartialEq)]
 pub enum FieldAssertion {
@@ -198,23 +268,34 @@ pub enum FieldAssertion {
     Equals { field: String, value: JsonValue },
     TypeIs { field: String, expected: JsonType },
     NumberRange(FieldRangeAssertion),
+    EventTopics(EventTopicsAssertion),
 }
 
 impl FieldAssertion {
-    fn field(&self) -> &str {
+    /// The top-level field this assertion names, if it names one. An
+    /// `event-topics` assertion addresses an entry in the `events` array
+    /// instead.
+    fn field(&self) -> Option<&str> {
         match self {
             FieldAssertion::Exists { field }
             | FieldAssertion::Absent { field }
             | FieldAssertion::Equals { field, .. }
-            | FieldAssertion::TypeIs { field, .. } => field,
-            FieldAssertion::NumberRange(assertion) => &assertion.field,
+            | FieldAssertion::TypeIs { field, .. } => Some(field),
+            FieldAssertion::NumberRange(assertion) => Some(&assertion.field),
+            FieldAssertion::EventTopics(_) => None,
         }
     }
 
     /// Checks this assertion against a response object, returning a
     /// human-readable failure reason if it does not hold.
     fn check(&self, response: &JsonValue) -> Result<(), String> {
-        let found = response.get(self.field());
+        if let FieldAssertion::EventTopics(assertion) = self {
+            return assertion.check_value(response);
+        }
+        let field = self
+            .field()
+            .expect("a non-event assertion always names a field");
+        let found = response.get(field);
         match self {
             FieldAssertion::Exists { field } => found.map(|_| ()).ok_or_else(|| {
                 format!("expected field {field:?} to be present, but it was missing")
@@ -244,6 +325,9 @@ impl FieldAssertion {
                 )),
             },
             FieldAssertion::NumberRange(assertion) => assertion.check_value(found),
+            // Handled by the early return above; repeated so the match stays
+            // exhaustive.
+            FieldAssertion::EventTopics(assertion) => assertion.check_value(response),
         }
     }
 }
@@ -345,7 +429,16 @@ fn parse_assertion(
 
     if let Some(message) = canary_fixtures::unknown_body_keys(
         table,
-        &["kind", "field", "value", "expected_type", "min", "max"],
+        &[
+            "kind",
+            "field",
+            "value",
+            "expected_type",
+            "min",
+            "max",
+            "index",
+            "topics",
+        ],
     ) {
         return Err(invalid(format!("[[assert]] entry: {message}")));
     }
@@ -354,21 +447,36 @@ fn parse_assertion(
         .get("kind")
         .and_then(toml::Value::as_str)
         .ok_or_else(|| invalid("assertion entry missing \"kind\"".to_string()))?;
-    let field = table
-        .get("field")
-        .and_then(toml::Value::as_str)
-        .ok_or_else(|| invalid("assertion entry missing \"field\"".to_string()))?
-        .to_string();
+    // `field` is required by every kind except `event-topics`, which
+    // addresses an entry in the `events` array instead.
+    let field = match table.get("field") {
+        None => None,
+        Some(value) => Some(
+            value
+                .as_str()
+                .ok_or_else(|| invalid("assertion \"field\" must be a string".to_string()))?
+                .to_string(),
+        ),
+    };
+    let field_or_error = || {
+        field
+            .clone()
+            .ok_or_else(|| invalid("assertion entry missing \"field\"".to_string()))
+    };
 
     match kind {
-        "field-exists" => Ok(FieldAssertion::Exists { field }),
-        "field-absent" => Ok(FieldAssertion::Absent { field }),
+        "field-exists" => Ok(FieldAssertion::Exists {
+            field: field_or_error()?,
+        }),
+        "field-absent" => Ok(FieldAssertion::Absent {
+            field: field_or_error()?,
+        }),
         "field-equals" => {
             let value = table
                 .get("value")
                 .ok_or_else(|| invalid("field-equals assertion missing \"value\"".to_string()))?;
             Ok(FieldAssertion::Equals {
-                field,
+                field: field_or_error()?,
                 value: toml_to_json(value),
             })
         }
@@ -379,7 +487,10 @@ fn parse_assertion(
                 .ok_or_else(|| invalid("field-type assertion missing \"expected_type\"".to_string()))?
                 .parse()
                 .map_err(invalid)?;
-            Ok(FieldAssertion::TypeIs { field, expected })
+            Ok(FieldAssertion::TypeIs {
+                field: field_or_error()?,
+                expected,
+            })
         }
         "field-number-range" => {
             let min = parse_range_bound(table, "min", &invalid)?;
@@ -398,13 +509,47 @@ fn parse_assertion(
                 }
             }
             Ok(FieldAssertion::NumberRange(FieldRangeAssertion {
-                field,
+                field: field_or_error()?,
                 min,
                 max,
             }))
         }
+        "event-topics" => {
+            let index = match table.get("index") {
+                None => 0,
+                Some(value) => value
+                    .as_integer()
+                    .and_then(|index| usize::try_from(index).ok())
+                    .ok_or_else(|| {
+                        invalid("event-topics \"index\" must be a non-negative integer".to_string())
+                    })?,
+            };
+            let topics = table
+                .get("topics")
+                .and_then(toml::Value::as_array)
+                .ok_or_else(|| {
+                    invalid("event-topics assertion requires a \"topics\" array".to_string())
+                })?
+                .iter()
+                .map(|topic| {
+                    topic.as_str().map(str::to_string).ok_or_else(|| {
+                        invalid("event-topics \"topics\" entries must be strings".to_string())
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if topics.is_empty() {
+                return Err(invalid(
+                    "event-topics assertion requires at least one topic; an empty list would check nothing"
+                        .to_string(),
+                ));
+            }
+            Ok(FieldAssertion::EventTopics(EventTopicsAssertion {
+                index,
+                topics,
+            }))
+        }
         other => Err(invalid(format!(
-            "unsupported assertion kind {other:?}: expected one of \"field-exists\", \"field-absent\", \"field-equals\", \"field-type\", \"field-number-range\""
+            "unsupported assertion kind {other:?}: expected one of \"field-exists\", \"field-absent\", \"field-equals\", \"field-type\", \"field-number-range\", \"event-topics\""
         ))),
     }
 }
@@ -493,6 +638,14 @@ impl<C: RpcClient + Sync> RpcRunner for DefaultRpcRunner<C> {
             RpcMethod::GetNetwork => self.client.get_network_raw().await,
             RpcMethod::GetLatestLedger => self.client.get_latest_ledger_raw().await,
             RpcMethod::GetHealth => self.client.get_health_raw().await,
+            RpcMethod::GetEvents => {
+                let params = fixture
+                    .request
+                    .clone()
+                    .map(serde_json::Value::Object)
+                    .unwrap_or_else(|| serde_json::Value::Object(Default::default()));
+                self.client.get_events_raw(params).await
+            }
         };
 
         let duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);

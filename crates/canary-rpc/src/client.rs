@@ -267,6 +267,15 @@ pub trait RpcClient {
         filters: &[EventFilter],
     ) -> impl std::future::Future<Output = Result<EventResponse, RpcError>> + Send;
 
+    /// `getEvents`'s JSON `result` object exactly as the endpoint returned
+    /// it, for the request parameters in `params`. See
+    /// [`RpcClient::get_network_raw`]: the runner asserts on the raw object so
+    /// an untyped event payload stays intact.
+    fn get_events_raw(
+        &self,
+        params: serde_json::Value,
+    ) -> impl std::future::Future<Output = Result<serde_json::Value, RpcError>> + Send;
+
     fn get_transactions(
         &self,
         start_ledger: u32,
@@ -865,6 +874,13 @@ impl RpcClient for HttpRpcClient {
             "filters": filters,
         });
         self.call("getEvents", params).await
+    }
+
+    async fn get_events_raw(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, RpcError> {
+        self.call_object("getEvents", params).await
     }
 
     async fn get_transactions(
