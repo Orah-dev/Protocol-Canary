@@ -3,17 +3,22 @@
 Pins the project's test dependencies for reproducible execution: writes
 a `.stellar-canary.lock` at the project root capturing the active
 fixture pack, the target protocol, and the tool version (CF-03).
+Bare `lock` writes; `lock verify` is its read-only counterpart.
 
 ```text
-Pin the current fixture pack, protocol, and tool version in a `.stellar-canary.lock` (CF-03)
+Manage the fixture-pack lockfile: bare `lock` writes the pin (CF-03-B), `lock verify` re-checks it (CF-03-D)
 
-Usage: stellar-canary lock [OPTIONS]
+Usage: stellar-canary lock [OPTIONS] [COMMAND]
+
+Commands:
+  verify  Verify that the lockfile still matches the fixture pack
+  help    Print this message or the help of the given subcommand(s)
 
 Options:
-      --protocol <PROTOCOL>        Target protocol version (overrides configuration)
-      --fixtures-dir <DIR>         Directory containing fixture files [default: fixtures]
-      --config <PATH>              Path to a configuration file (default: .stellar-canary.toml in the project root)
-  -h, --help                       Print help
+      --protocol <PROTOCOL>          Target protocol version (overrides configuration)
+      --fixtures-dir <FIXTURES_DIR>  Directory containing fixture files [default: fixtures]
+      --config <CONFIG>              Path to a configuration file (default: .stellar-canary.toml in the project root)
+  -h, --help                         Print help
 ```
 
 ## The lockfile
@@ -60,3 +65,23 @@ lockfile** behind.
 stellar-canary lock --fixtures-dir ProtocolCanary-Fixtures/protocol-28
 # Wrote /path/to/project/.stellar-canary.lock (lockVersion 1, protocol 28, packDigest sha256:…)
 ```
+
+## `lock verify`
+
+`stellar-canary lock verify` is the read-only counterpart (CF-03-D): it
+loads the lock under the parser rules of CF-03 section 3, recomputes the
+`canary-pack-v1` digest (CF-02) of the directory the configuration
+resolves to, and compares the two. It never writes — the fixture pack,
+the lockfile and the cache are left exactly as they are — and a stale
+pin fails with the [exit-code contract](../exit-codes.md)'s
+configuration error (`2`), naming the expected and computed digests.
+
+```bash
+stellar-canary lock verify
+# Verified: /path/to/project/.stellar-canary.lock matches the fixture pack at fixtures (…)
+```
+
+Additional flags: `--project-root <PATH>` (treat another directory as
+the project root), `--fixtures-dir <PATH>` (verify a different pack
+location — a flag chooses a location, it does not waive the pin) and
+`--config <PATH>`.
