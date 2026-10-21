@@ -6,6 +6,24 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- `stellar-canary lock` (issue #445, CF-03): writes a
+  `.stellar-canary.lock` at the project root pinning the active fixture
+  pack's canonical `packDigest` (`canary-pack-v1`, CF-02, computed in
+  `canary_fixtures::digest`), the target protocol and the tool version,
+  with a deterministic serializer (fixed key order, no timestamps — the
+  same pack always yields byte-identical output). The pack is fully
+  validated before the lockfile is touched, so a failure never leaves a
+  partial file behind.
+- `stellar-canary diff` (issues #447, #448, #449, CF-05): compares two
+  stored JSON reports offline and prints the deterministic
+  `diffVersion: 1` comparison document — every identity with its
+  `classification`, `missing`, `summary` and a strict
+  `regression` > `coverage-lost` > `improved` > `no-change` verdict —
+  with CF-05's CI-gating exit codes: `0` `no-change`/`improved`, `1`
+  `regression`/`coverage-lost`, `2` reports not comparable or invalid
+  input. Ineligible pairs (mismatched `schemaVersion` or
+  `targetProtocol`, duplicate identities, unparseable input) refuse with
+  an explanatory diagnostic on stderr and no JSON at all.
 - `stellar-canary check --fixture <ID>` and `--surface <xdr|rpc|soroban>` to
   run a targeted subset of fixtures. The filters may be combined, preserve
   fixture order, and report an error when no fixture matches.

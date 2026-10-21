@@ -16,7 +16,8 @@ use canary_core::Surface;
 ///
 /// `Cli` is the `clap` entry point: it holds the one required subcommand the
 /// user typed — [`Command::Check`], [`Command::Inspect`],
-/// [`Command::Fixtures`], [`Command::Report`], [`Command::Completions`] or
+/// [`Command::Fixtures`], [`Command::Report`], [`Command::Diff`],
+/// [`Command::Lock`], [`Command::Completions`] or
 /// [`Command::Version`] — together with that subcommand's own argument
 /// struct. The binary name and
 /// version banner come from the `#[command(...)]` attributes above, and flags
@@ -41,7 +42,9 @@ pub struct Cli {
 ///
 /// `Check` runs compatibility assertions, while `Inspect` and `Fixtures`
 /// provide offline project and fixture information. `Report` renders a
-/// previously generated JSON report, `Completions` prints a shell
+/// previously generated JSON report, `Diff` compares two stored reports
+/// (CF-05), `Lock` pins the fixture pack in a `.stellar-canary.lock`
+/// (CF-03), `Completions` prints a shell
 /// completion script, and `Version` prints the tool version. Parsing this
 /// enum is handled by `clap`; the variants themselves do not perform I/O or
 /// panic during argument parsing.
@@ -54,6 +57,11 @@ pub enum Command {
     Fixtures(FixturesArgs),
     /// Render a previously generated JSON report.
     Report(ReportArgs),
+    /// Compare two stored JSON reports and render the diff (CF-05).
+    Diff(DiffArgs),
+    /// Pin the current fixture pack, protocol, and tool version in a
+    /// `.stellar-canary.lock` (CF-03).
+    Lock(LockArgs),
     /// Manage the local result cache.
     #[command(subcommand)]
     Cache(CacheArgs),
@@ -492,6 +500,74 @@ pub struct ReportArgs {
     /// Output format to render the stored report as.
     #[arg(long, value_enum, default_value_t = OutputFormat::Markdown)]
     pub format: OutputFormat,
+}
+
+#[derive(Debug, Parser)]
+/// Arguments for the `stellar-canary diff` subcommand ([`Command::Diff`]).
+///
+/// `diff` compares two previously stored JSON reports offline and renders
+/// the comparison as the deterministic `diffVersion: 1` document of
+/// CF-05. Nothing is re-run and no network call is made. The argument
+/// order is **current first, baseline second**, matching the question
+/// "what changed since the baseline".
+///
+/// `diff` gates CI on the shared exit-code contract as read through
+/// CF-05 section 5: `0` ([`canary_core::ExitCode::Pass`]) for verdict
+/// `no-change` or `improved`, `1`
+/// ([`canary_core::ExitCode::CompatibilityFailure`]) for verdict
+/// `regression` or `coverage-lost`, and `2`
+/// ([`canary_core::ExitCode::ConfigurationError`]) when the reports
+/// are not comparable or an input file is missing or invalid.
+///
+/// Parsing is performed by `clap` and performs no I/O and cannot panic: a
+/// missing path is a usage error (exit status 2) before a `DiffArgs`
+/// value ever exists.
+///
+/// # Examples
+///
+/// ```text
+/// stellar-canary diff current.json baseline.json
+/// ```
+pub struct DiffArgs {
+    /// Path to the current report (produced by `stellar-canary check --json`).
+    pub current_report: PathBuf,
+
+    /// Path to the baseline report to compare the current report against.
+    pub baseline_report: PathBuf,
+}
+
+#[derive(Debug, Parser)]
+/// Arguments for the `stellar-canary lock` subcommand ([`Command::Lock`]).
+///
+/// `lock` validates the fixture pack, computes its canonical
+/// `canary-pack-v1` digest (CF-02) and writes a `.stellar-canary.lock`
+/// (CF-03) at the project root pinning the digest, the target protocol
+/// and the tool version. The serializer is deterministic: the same pack
+/// always yields a byte-identical file. The pack is fully validated
+/// before the lockfile is touched, so a failure never leaves a partial
+/// file behind.
+///
+/// Parsing is performed by `clap` and performs no I/O and cannot panic.
+///
+/// # Examples
+///
+/// ```text
+/// stellar-canary lock
+/// stellar-canary lock --protocol 29 --fixtures-dir fixtures
+/// ```
+pub struct LockArgs {
+    /// Target protocol version (overrides configuration).
+    #[arg(long)]
+    pub protocol: Option<u32>,
+
+    /// Directory containing fixture files.
+    #[arg(long = "fixtures-dir", default_value = "fixtures")]
+    pub fixtures_dir: PathBuf,
+
+    /// Path to a configuration file (default: .stellar-canary.toml in the
+    /// project root).
+    #[arg(long)]
+    pub config: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]

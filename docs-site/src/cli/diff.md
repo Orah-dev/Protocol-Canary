@@ -13,6 +13,9 @@ Usage: stellar-canary diff <CURRENT_REPORT> <BASELINE_REPORT>
 Arguments:
   <CURRENT_REPORT>  Path to the current report (produced by `stellar-canary check --json`)
   <BASELINE_REPORT> Path to the baseline report to compare the current report against
+
+Options:
+  -h, --help  Print help
 ```
 
 Note the argument order: **current first, baseline second**. The diff
@@ -22,67 +25,75 @@ now.
 
 ## Exit codes (CF-05)
 
-`diff` uses its own dedicated CI-gating exit codes — deliberately
-**not** the global [exit-code contract](../exit-codes.md) that `check`
-and friends use:
+`diff` uses the same [exit-code contract](../exit-codes.md) as `check`
+and friends — CF-05 section 5 fixes its numbers to "mirror the existing
+meanings of `1` and `2`" — read through the comparison's lens:
 
-| Code | Meaning |
-|---|---|
-| `0` | Verdict `no-change` or `improved` — safe to merge. |
-| `2` | Verdict `regression` or `coverage-lost`; also used when the two reports are **not comparable** (see below). |
-| `1` | Execution/syntax error: a report file could not be read or is not a valid report. |
+| Code | Global contract | `diff` meaning |
+|---|---|---|
+| `0` | `Pass` | Verdict `no-change` or `improved` — safe to merge. |
+| `1` | `CompatibilityFailure` | Verdict `regression` or `coverage-lost`. |
+| `2` | `ConfigurationError` | The two reports are **not comparable**, or a report file is missing or invalid (see below). |
 
 ## Comparison eligibility
 
 Two reports are only comparable when they carry the **same, supported
-`schemaVersion`** and the **same `targetProtocol`**. Comparing a
-Protocol 28 report against a Protocol 29 baseline would otherwise
-produce a diff full of cross-protocol noise that looks like a real
-regression, so `diff` refuses instead: it prints a diagnostic
-explaining exactly why (a `schemaVersion mismatch` or `protocol
-mismatch`) on stderr, produces no JSON, and exits `2`.
+`schemaVersion`** and the **same `targetProtocol`**, with no identity
+listed twice in either input. Comparing a Protocol 28 report against a
+Protocol 29 baseline would otherwise produce a diff full of
+cross-protocol noise that looks like a real regression, so `diff`
+refuses instead: it prints a diagnostic explaining exactly why (a
+`schemaVersion mismatch`, a protocol mismatch, a duplicate identity or
+an invalid report) on stderr, produces no JSON, and exits `2`.
 
 ## Verdicts
 
-The `verdict` field follows a strict precedence: `regression` beats
-`coverage-lost`, which beats `improved`, which beats `no-change`.
+The `verdict` field follows a strict precedence, evaluated in this
+order, first match wins:
 
-- **regression** — at least one test that ran in both reports got
-  strictly worse (`pass` → `warning`/`fail`/`error`, etc.).
-- **coverage-lost** — at least one baseline test is absent from the
-  current report, and nothing regressed.
-- **improved** — every difference is a status getting better; nothing
-  regressed or vanished.
+- **regression** — at least one entry has `regression: true`.
+- **coverage-lost** — `missing` is non-empty (a baseline test is absent
+  from the current report) and nothing regressed.
+- **improved** — at least one entry is `resolved`, `improved` or
+  `added`; nothing regressed or vanished.
 - **no-change** — nothing differs.
 
-Newly added tests (present only in the current report) appear in the
-`added` array but never change the verdict: no existing test got worse.
+Newly added tests appear in `entries` with an `absent` `from` state;
+they never flip the verdict into a regression.
 
 ## Output shape
 
 ```json
 {
   "diffVersion": 1,
-  "verdict": "regression",
-  "transitions": [
-    { "surface": "rpc", "testId": "p28-rpc-1", "from": "pass", "to": "fail" }
+  "comparable": true,
+  "baseline": { "toolVersion": "0.2.0", "targetProtocol": 28, "status": "pass" },
+  "current": { "toolVersion": "0.2.0", "targetProtocol": 28, "status": "fail" },
+  "fixturePackChanged": null,
+  "observedProtocolChanged": false,
+  "emptyBaseline": false,
+  "emptyCurrent": false,
+  "entries": [
+    { "surface": "rpc", "id": "p28-rpc-1", "from": "pass", "to": "fail", "classification": "regressed", "regression": true }
   ],
-  "missing": [
-    { "surface": "xdr", "testId": "p28-xdr-2", "baselineStatus": "pass" }
-  ],
-  "added": [
-    { "surface": "soroban", "testId": "p28-soroban-3", "status": "pass" }
-  ]
+  "missing": [],
+  "summary": { "regressed": 1, "resolved": 0, "added": 0, "removed": 0, "unchanged": 0, "missing": 0 },
+  "verdict": "regression"
 }
 ```
 
 | Field | Meaning |
 |---|---|
 | `diffVersion` | Integer, currently `1`. |
+| `comparable` | Always `true` when a document is produced: an ineligible pair exits `2` with no output at all. |
+| `baseline` / `current` | Each side's `toolVersion`, `targetProtocol` and overall `status`. |
+| `fixturePackChanged` | `null` — unknown until reports carry a `fixturePack` digest (never silently `false`). |
+| `observedProtocolChanged` | `true` only when both reports observed a protocol and they differ. |
+| `emptyBaseline` / `emptyCurrent` | Whether that side had no results (an empty side cannot establish a regression). |
+| `entries` | Every identity from either report: `surface`, `id`, `from`/`to` state (`pass`, `warning`, `fail`, `error`, `skipped`, `absent`), the CF-05 `classification` and the `regression` flag. Sorted by `(surface, id)` in UTF-8 byte order. |
+| `missing` | Baseline identities that passed but are absent or skipped now (coverage lost). |
+| `summary` | Counts over `entries` and `missing`. |
 | `verdict` | One of `no-change`, `improved`, `coverage-lost`, `regression`. |
-| `transitions` | Tests present in both reports with a different status. Sorted by `(surface, testId)` — surfaces alphabetically (`rpc`, `soroban`, `xdr`). |
-| `missing` | Tests present in the baseline only (coverage lost), with the status they had there. |
-| `added` | Tests present in the current report only. Omitted entirely when empty. |
 
 Serialization is deterministic: the same pair of reports always
 produces byte-identical JSON, so the output can be committed, diffed, or
@@ -95,5 +106,5 @@ stellar-canary check --json > current.json        # on the PR branch
 git stash && stellar-canary check --json > baseline.json && git stash pop
 
 stellar-canary diff current.json baseline.json
-echo $?   # 0 clean/improved, 2 regression, 1 error
+echo $?   # 0 no-change/improved, 1 regression/coverage-lost, 2 invalid input
 ```

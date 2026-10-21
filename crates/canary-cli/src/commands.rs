@@ -9,16 +9,16 @@ use canary_core::{
 };
 use canary_git::{collect_git_context, CliGitRepository};
 use canary_report::{
-    JUnitReporter, JsonReporter, MarkdownReporter, NetworkSummary, ProjectSummary, ReportInput,
-    TerminalReporter,
+    diff, JUnitReporter, JsonReporter, MarkdownReporter, NetworkSummary, ProjectSummary,
+    ReportInput, TerminalReporter,
 };
 use canary_rpc::{validate_network_info, HttpRpcClient, RetryPolicy, RpcClient, RpcError};
 use canary_runner::{EnabledSurfaces, NetworkMode};
 use clap::CommandFactory;
 
 use crate::cli::{
-    CacheClearArgs, CheckArgs, Cli, CompletionsArgs, FixturesArgs, FixturesFormat, InspectArgs,
-    InspectFormat, OutputFormat, ReportArgs,
+    CacheClearArgs, CheckArgs, Cli, CompletionsArgs, DiffArgs, FixturesArgs, FixturesFormat,
+    InspectArgs, InspectFormat, LockArgs, OutputFormat, ReportArgs,
 };
 use crate::error::{hint_for, print_error};
 use crate::fixtures_json;
@@ -1244,41 +1244,23 @@ fn run_report_inner(args: ReportArgs) -> Result<ExitCode, CanaryError> {
     Ok(exit_code)
 }
 
-/// CF-05 exit codes for `stellar-canary diff`.
+/// Exit codes for `stellar-canary diff` (CF-05 section 5).
 ///
-/// These deliberately differ from `canary_core::ExitCode`'s global
-/// contract (0 pass, 1 compatibility failure, 2 configuration error, …):
-/// the `diff` subcommand follows CF-05's CI-gating convention instead —
-/// 0 = no regressions or improved, 2 = regressions/coverage lost or
-/// reports not comparable, 1 = execution or syntax error — and callers
-/// of `diff` must be able to rely on *those* numbers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(i32)]
-pub enum DiffExitCode {
-    /// Verdict is `no-change` or `improved`.
-    Pass = 0,
-    /// A report file could not be read or parsed.
-    Error = 1,
-    /// Verdict is `regression` or `coverage-lost`, or the two reports
-    /// are not comparable (ineligible baselines).
-    Regression = 2,
-}
-
-impl DiffExitCode {
-    pub fn code(self) -> i32 {
-        self as i32
-    }
-}
-
-/// A `diff` failure: the CF-05 exit code to use and the diagnostic to
-/// print on stderr.
+/// `diff` gates CI on the same numeric contract as every other command —
+/// CF-05 states its codes "mirror the existing meanings of `1` and `2`"
+/// — read through the comparison's lens: [`ExitCode::Pass`] (0) for
+/// verdict `no-change` or `improved`, [`ExitCode::CompatibilityFailure`]
+/// (1) for verdict `regression` or `coverage-lost`, and
+/// [`ExitCode::ConfigurationError`] (2) when the two reports are not
+/// comparable or an input file is missing or invalid. Callers of `diff`
+/// must be able to rely on *those* numbers.
 struct DiffCommandError {
-    exit_code: DiffExitCode,
+    exit_code: ExitCode,
     message: String,
 }
 
 impl DiffCommandError {
-    fn new(exit_code: DiffExitCode, message: impl Into<String>) -> Self {
+    fn new(exit_code: ExitCode, message: impl Into<String>) -> Self {
         DiffCommandError {
             exit_code,
             message: message.into(),
@@ -1286,57 +1268,46 @@ impl DiffCommandError {
     }
 }
 
-/// Compares two stored reports (CF-05). Returns the process exit code
-/// directly rather than a `canary_core::ExitCode`, since `diff` follows
-/// CF-05's dedicated 0/1/2 gating codes (see [`DiffExitCode`]).
-pub fn run_diff(args: DiffArgs) -> i32 {
+/// Compares two stored reports (CF-05) and returns the process exit code
+/// through the shared [`ExitCode`] contract.
+pub fn run_diff(args: DiffArgs) -> ExitCode {
     match run_diff_inner(args) {
-        Ok(exit_code) => exit_code.code(),
+        Ok(exit_code) => exit_code,
         Err(err) => {
             eprintln!("error: {}", err.message);
-            err.exit_code.code()
+            err.exit_code
         }
     }
 }
 
-fn run_diff_inner(args: DiffArgs) -> Result<DiffExitCode, DiffCommandError> {
-    let load = |path: &Path| -> Result<StoredReport, DiffCommandError> {
-        let text = std::fs::read_to_string(path).map_err(|e| {
+fn run_diff_inner(args: DiffArgs) -> Result<ExitCode, DiffCommandError> {
+    let read = |path: &Path| -> Result<String, DiffCommandError> {
+        std::fs::read_to_string(path).map_err(|e| {
             DiffCommandError::new(
-                DiffExitCode::Error,
+                ExitCode::ConfigurationError,
                 format!("failed to read report file {}: {e}", path.display()),
             )
-        })?;
-        let (schema_version, input) = JsonReporter::parse_with_schema(&text).map_err(|e| {
-            DiffCommandError::new(
-                DiffExitCode::Error,
-                format!("invalid report file {}: {e}", path.display()),
-            )
-        })?;
-        Ok(StoredReport {
-            schema_version,
-            input,
         })
     };
 
-    let current = load(&args.current_report)?;
-    let baseline = load(&args.baseline_report)?;
+    let current = read(&args.current_report)?;
+    let baseline = read(&args.baseline_report)?;
 
-    // Eligibility (schemaVersion + targetProtocol) is checked here and
-    // refuses with CF-05 exit code 2 — never a bogus "diff" full of
+    // Eligibility (a supported schemaVersion on both sides, the same
+    // targetProtocol, no duplicate identities) is checked here and
+    // refuses with exit code 2 — never a bogus "diff" full of
     // cross-protocol noise.
-    let diff = canary_report::diff::compare_reports(baseline, current)
-        .map_err(|err| DiffCommandError::new(DiffExitCode::Regression, err.to_string()))?;
+    let comparison = diff::compare_json(&baseline, &current, diff::CompareOptions::default())
+        .map_err(|err| DiffCommandError::new(ExitCode::ConfigurationError, err.to_string()))?;
 
     // The diffVersion 1 JSON goes to stdout regardless of the verdict,
     // mirroring `check --json`: CI consumes stdout, gating on the exit
     // code.
-    println!("{}", DiffJsonReporter::render(&diff));
+    println!("{}", comparison.to_json());
 
-    Ok(if diff.verdict.is_failure() {
-        DiffExitCode::Regression
-    } else {
-        DiffExitCode::Pass
+    Ok(match comparison.verdict {
+        diff::Verdict::Regression | diff::Verdict::CoverageLost => ExitCode::CompatibilityFailure,
+        diff::Verdict::Improved | diff::Verdict::NoChange => ExitCode::Pass,
     })
 }
 
@@ -1371,16 +1342,25 @@ fn run_lock_inner(args: LockArgs) -> Result<ExitCode, CanaryError> {
     }
     let loaded_fixtures = canary_fixtures::load_directory(&args.fixtures_dir)?;
     canary_fixtures::validate(&loaded_fixtures)?;
-    let pack_digest = canary_fixtures::pack_digest(&loaded_fixtures)?;
+    let digest = canary_fixtures::pack_digest(&args.fixtures_dir).map_err(|e| {
+        CanaryError::Configuration(format!("failed to digest the fixture pack: {e}"))
+    })?;
 
-    let lockfile = canary_config::Lockfile::new(
-        protocol,
-        pack_digest,
-        env!("CARGO_PKG_VERSION").to_string(),
-    );
+    let lockfile = canary_config::LockFile {
+        lock_version: canary_config::SUPPORTED_LOCK_VERSION,
+        tool: Some(canary_config::LockTool {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        }),
+        fixtures: canary_config::LockFixtures {
+            protocol,
+            pack_digest: digest.digest,
+            registry_version: canary_config::SUPPORTED_REGISTRY_VERSION,
+            source: Some(canary_config::LockSource::Directory),
+            revision: None,
+        },
+    };
     let path = root.join(canary_config::LOCK_FILE_NAME);
-    canary_config::lockfile::write(&path, &lockfile)
-        .map_err(|e| CanaryError::Internal(e.to_string()))?;
+    canary_config::write_lock(&path, &lockfile)?;
 
     println!(
         "Wrote {} (lockVersion {}, protocol {}, packDigest {})",

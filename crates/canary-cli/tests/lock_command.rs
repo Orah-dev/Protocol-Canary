@@ -37,11 +37,7 @@ fn lock_writes_a_cf03_conforming_lockfile_at_the_project_root() {
     project.write("fixtures/p28-xdr-lock-001.toml", VALID_FIXTURE);
 
     let output = run_in(&project.path, &["lock"]);
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        stderr(&output)
-    );
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
 
     let contents = read_lockfile(&project);
     assert!(
@@ -49,8 +45,9 @@ fn lock_writes_a_cf03_conforming_lockfile_at_the_project_root() {
         "lockfile must set lockVersion = 1, got:\n{contents}"
     );
     assert!(
-        contents.contains("toolVersion = ") && contents.contains(env!("CARGO_PKG_VERSION")),
-        "lockfile must pin the tool version, got:\n{contents}"
+        contents.contains("[tool]")
+            && contents.contains(&format!("version = \"{}\"", env!("CARGO_PKG_VERSION"))),
+        "lockfile must pin the tool version in [tool].version, got:\n{contents}"
     );
     assert!(
         contents.contains("[fixtures]"),
@@ -59,6 +56,12 @@ fn lock_writes_a_cf03_conforming_lockfile_at_the_project_root() {
     assert!(
         contents.contains("protocol = 28"),
         "lockfile must pin the protocol, got:\n{contents}"
+    );
+    // registryVersion is a required CF-03 key naming the pack registry
+    // format this build supports.
+    assert!(
+        contents.contains("registryVersion = 1"),
+        "lockfile must pin the registry version, got:\n{contents}"
     );
 
     // packDigest is a canary-pack-v1 digest: "sha256:" followed by 64
@@ -134,14 +137,15 @@ fn locking_twice_produces_byte_identical_output() {
 }
 
 #[test]
-fn identical_pack_content_in_different_directories_pins_the_same_digest() {
-    // Content addressing: the digest must not depend on where the pack
-    // lives on disk, so two checkouts of the same fixtures pin the same
-    // digest.
+fn identical_pack_content_at_different_locations_pins_the_same_digest() {
+    // Content addressing (CF-02): the digest is independent of the pack's
+    // root location — the same relative layout checked out at two paths
+    // must pin the same digest. The relative layout itself *is* part of
+    // the pack identity, so two checkouts use the same layout here.
     let project_a = TempProject::new("lock-pack-a");
     let project_b = TempProject::new("lock-pack-b");
     project_a.write("fixtures/p28-xdr-lock-001.toml", VALID_FIXTURE);
-    project_b.write("fixtures/nested/p28-xdr-lock-001.toml", VALID_FIXTURE);
+    project_b.write("fixtures/p28-xdr-lock-001.toml", VALID_FIXTURE);
 
     assert!(run_in(&project_a.path, &["lock"]).status.success());
     assert!(run_in(&project_b.path, &["lock"]).status.success());
@@ -156,7 +160,7 @@ fn identical_pack_content_in_different_directories_pins_the_same_digest() {
     assert_eq!(
         digest_of(&project_a),
         digest_of(&project_b),
-        "identical pack content must produce an identical packDigest"
+        "the same pack at different root paths must produce an identical packDigest"
     );
 }
 

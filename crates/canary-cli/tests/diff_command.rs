@@ -1,18 +1,19 @@
 //! End-to-end tests for `stellar-canary diff`
 //! (`cargo test -p canary-cli --test diff_command`), covering issue
-//! #448's CF-05 exit-code contract:
+//! #448's CF-05 exit-code contract as documented in
+//! `docs/contracts/cf-05-report-comparison.md`:
 //!
-//! - 0 = no regressions / improved
-//! - 2 = regressions detected, coverage lost, or reports not comparable
-//! - 1 = execution / syntax error (missing or unparseable report files)
+//! - 0 = verdict `no-change` or `improved`
+//! - 1 = verdict `regression` or `coverage-lost`
+//! - 2 = reports not comparable, or an input file is missing/invalid
 
 mod support;
 
 use support::{run_in, stderr, stdout, TempProject};
 
 /// A minimal-but-valid `check --json` report: exactly the fields
-/// `JsonReporter::parse_with_schema` requires, with everything else
-/// defaulted the same way a real report defaults it.
+/// `JsonReporter::parse` requires, with everything else defaulted the
+/// same way a real report defaults it.
 fn report_json(target_protocol: u32, results: &[(&str, &str, &str)]) -> String {
     let results: Vec<serde_json::Value> = results
         .iter()
@@ -95,21 +96,23 @@ fn an_improved_report_exits_zero() {
 }
 
 #[test]
-fn a_regressed_report_exits_two() {
+fn a_regressed_report_exits_one() {
     let project = DiffProject::new("diff-regression");
     project.write_report("baseline.json", 28, &[("p28-xdr-1", "xdr", "pass")]);
     project.write_report("current.json", 28, &[("p28-xdr-1", "xdr", "fail")]);
 
     let output = project.diff("current.json", "baseline.json");
-    assert_eq!(exit_code(&output), 2, "stderr: {}", stderr(&output));
+    assert_eq!(exit_code(&output), 1, "stderr: {}", stderr(&output));
     let value: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("json");
     assert_eq!(value["verdict"], "regression");
-    assert_eq!(value["transitions"][0]["from"], "pass");
-    assert_eq!(value["transitions"][0]["to"], "fail");
+    assert_eq!(value["entries"][0]["from"], "pass");
+    assert_eq!(value["entries"][0]["to"], "fail");
+    assert_eq!(value["entries"][0]["classification"], "regressed");
+    assert_eq!(value["entries"][0]["regression"], true);
 }
 
 #[test]
-fn lost_coverage_exits_two() {
+fn lost_coverage_exits_one() {
     let project = DiffProject::new("diff-coverage-lost");
     project.write_report(
         "baseline.json",
@@ -119,10 +122,10 @@ fn lost_coverage_exits_two() {
     project.write_report("current.json", 28, &[("p28-xdr-1", "xdr", "pass")]);
 
     let output = project.diff("current.json", "baseline.json");
-    assert_eq!(exit_code(&output), 2, "stderr: {}", stderr(&output));
+    assert_eq!(exit_code(&output), 1, "stderr: {}", stderr(&output));
     let value: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("json");
     assert_eq!(value["verdict"], "coverage-lost");
-    assert_eq!(value["missing"][0]["testId"], "p28-rpc-1");
+    assert_eq!(value["missing"][0]["id"], "p28-rpc-1");
 }
 
 #[test]
@@ -140,32 +143,37 @@ fn argument_order_is_current_then_baseline() {
 }
 
 #[test]
-fn a_missing_report_file_exits_one_and_names_the_file() {
+fn a_missing_report_file_exits_two_and_names_the_file() {
     let project = DiffProject::new("diff-missing-file");
     project.write_report("baseline.json", 28, &[("p28-xdr-1", "xdr", "pass")]);
 
     let output = project.diff("no-such-current.json", "baseline.json");
-    assert_eq!(exit_code(&output), 1);
+    assert_eq!(exit_code(&output), 2);
     let message = stderr(&output);
     assert!(
-        message.contains("failed to read report file")
-            && message.contains("no-such-current.json"),
+        message.contains("failed to read report file") && message.contains("no-such-current.json"),
         "error must name the unreadable file, got: {message}"
     );
 }
 
 #[test]
-fn an_unparseable_report_exits_one() {
+fn an_unparseable_report_exits_two() {
     let project = DiffProject::new("diff-unparseable");
     project.dir.write("current.json", "not json at all");
     project.write_report("baseline.json", 28, &[("p28-xdr-1", "xdr", "pass")]);
 
     let output = project.diff("current.json", "baseline.json");
-    assert_eq!(exit_code(&output), 1);
+    assert_eq!(exit_code(&output), 2);
     let message = stderr(&output);
     assert!(
-        message.contains("invalid report file"),
+        message.contains("not a valid report"),
         "error must say the report is invalid, got: {message}"
+    );
+    // A refused comparison produces no diff JSON on stdout at all.
+    assert!(
+        stdout(&output).trim().is_empty(),
+        "stdout must stay empty on refusal, got: {}",
+        stdout(&output)
     );
 }
 
@@ -179,7 +187,7 @@ fn comparing_protocol_28_against_29_exits_two_with_a_protocol_mismatch() {
     assert_eq!(exit_code(&output), 2);
     let message = stderr(&output);
     assert!(
-        message.contains("protocol mismatch") && message.contains('28') && message.contains('29'),
+        message.contains("not comparable") && message.contains("28") && message.contains("29"),
         "error must explain the protocol mismatch, got: {message}"
     );
     // A refused comparison produces no diff JSON on stdout at all.
@@ -208,17 +216,23 @@ fn mismatched_schema_versions_exit_two() {
             "durationMs": 1,
         }],
     });
-    project
-        .dir
-        .write("current.json", &serde_json::to_string_pretty(&current).unwrap());
+    project.dir.write(
+        "current.json",
+        &serde_json::to_string_pretty(&current).unwrap(),
+    );
     project.write_report("baseline.json", 28, &[("p28-xdr-1", "xdr", "pass")]);
 
     let output = project.diff("current.json", "baseline.json");
     assert_eq!(exit_code(&output), 2);
     let message = stderr(&output);
     assert!(
-        message.contains("schemaVersion mismatch"),
+        message.contains("schemaVersion") && message.contains("does not support"),
         "error must explain the schema mismatch, got: {message}"
+    );
+    assert!(
+        stdout(&output).trim().is_empty(),
+        "stdout must stay empty on refusal, got: {}",
+        stdout(&output)
     );
 }
 

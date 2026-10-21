@@ -1,7 +1,6 @@
 //! Configuration loading and validation for Stellar Protocol Canary.
 
 pub mod loader;
-pub mod lockfile;
 pub mod schema;
 
 pub use loader::{
